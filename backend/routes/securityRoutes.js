@@ -29,7 +29,16 @@ const ratingGuard = require('../security/ratingGuard');
 const fileScan = require('../security/fileScan');
 const siemExport = require('../security/siemExport');
 
-const pkg = require('../../Security_Layer/package.json');
+let pkg = { version: "5.2.0" };
+try {
+    pkg = require('../../Security_Layer/package.json');
+} catch (err) {
+    try {
+        pkg = require('../package.json');
+    } catch (e) {
+        // Fallback version
+    }
+}
 
 const STARTED_AT = Date.now();
 const LOG_FILE = path.join(__dirname, '..', 'attacks.json');
