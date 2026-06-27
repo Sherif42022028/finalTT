@@ -17,4 +17,4 @@ COPY . /backend-api/
 RUN python -m spacy download en_core_web_md
 RUN python -m pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.1/en_core_sci_md-0.5.1.tar.gz
 
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+CMD python manage.py migrate && python seed_medical_data.py && python seed_data.py && gunicorn HospitalManagement.wsgi:application --bind 0.0.0.0:${PORT:-8000}

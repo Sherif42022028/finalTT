@@ -1333,7 +1333,8 @@ router.post('/recommend-doc', async (req, res) => {
         return res.status(400).json({ error: 'Symptoms field is required' });
     }
     try {
-        const response = await fetch('http://127.0.0.1:8000/api/recommend-doc', {
+        const djangoAiUrl = process.env.DJANGO_AI_URL || 'http://127.0.0.1:8000';
+        const response = await fetch(`${djangoAiUrl}/api/recommend-doc`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ symptoms })
