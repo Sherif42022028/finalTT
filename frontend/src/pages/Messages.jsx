@@ -166,9 +166,9 @@ const Messages = () => {
         }
     }, [messages]);
 
-    // Connect to Socket.io to receive real-time updates from other browsers
     useEffect(() => {
-        const socket = io('http://localhost:5000');
+        const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+        const socket = io(backendUrl);
         
         socket.on('chat-message', (data) => {
             if (activeChat && data.key === `${activeChat.dId}_${activeChat.pEmail}`) {

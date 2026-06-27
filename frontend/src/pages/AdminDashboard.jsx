@@ -86,8 +86,9 @@ const AdminDashboard = () => {
     useEffect(() => {
         if (activeTab !== 'soc') return;
 
-        console.log('[SOC Socket] Connecting to http://localhost:5000...');
-        const socket = io('http://localhost:5000');
+        const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+        console.log(`[SOC Socket] Connecting to ${backendUrl}...`);
+        const socket = io(backendUrl);
         socSocketRef.current = socket;
 
         // Fetch initial stats and blocked list via REST APIs to avoid delays
@@ -97,13 +98,13 @@ const AdminDashboard = () => {
                 'Content-Type': 'application/json'
             };
             try {
-                const statsRes = await fetch('http://localhost:5000/api/soc-stats', { headers: socHeaders });
+                const statsRes = await fetch(`${backendUrl}/api/soc-stats`, { headers: socHeaders });
                 const statsData = await statsRes.json();
                 if (statsData && statsData.health !== undefined) {
                     setSocHealth(statsData.health);
                 }
                 
-                const blockedRes = await fetch('http://localhost:5000/api/blocked-ips', { headers: socHeaders });
+                const blockedRes = await fetch(`${backendUrl}/api/blocked-ips`, { headers: socHeaders });
                 const blockedData = await blockedRes.json();
                 if (Array.isArray(blockedData)) {
                     setBlockedIPs(blockedData);
@@ -164,7 +165,7 @@ const AdminDashboard = () => {
         });
 
         return () => {
-            console.log('[SOC Socket] Disconnecting from http://localhost:5000...');
+            console.log(`[SOC Socket] Disconnecting from ${backendUrl}...`);
             socket.disconnect();
             socSocketRef.current = null;
         };

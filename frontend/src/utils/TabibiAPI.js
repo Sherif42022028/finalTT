@@ -5,7 +5,8 @@
 import axios from 'axios';
 
 // Set base URL for axios requests
-axios.defaults.baseURL = ''; // Set relative or back-end domain if needed
+const VITE_BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+axios.defaults.baseURL = VITE_BACKEND_URL;
 
 const KEYS = {
     USER: 'tabibi_user',
