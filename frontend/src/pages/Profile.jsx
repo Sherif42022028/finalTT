@@ -174,12 +174,29 @@ const Profile = () => {
                 reader.readAsDataURL(file);
             }
         } else {
-            // Patient / local fallback
+            // Patient upload to server
             const reader = new FileReader();
-            reader.onload = (e) => {
-                const updatedUser = { ...user, image: e.target.result, img: e.target.result };
+            reader.onload = async (e) => {
+                const base64 = e.target.result;
+                setAvatar(base64);
+                
+                // Save locally first
+                const updatedUser = { ...user, image: base64, img: base64 };
                 TabibiAPI.saveUser(updatedUser);
-                TabibiAPI.showToast('✓ Profile picture updated');
+                
+                // Try saving to backend
+                try {
+                    const token = TabibiAPI.getToken();
+                    await axios.put('/api/auth/profile', {
+                        image: base64
+                    }, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    TabibiAPI.showToast('✓ Profile picture synced to server');
+                } catch (err) {
+                    console.error("Failed to sync profile picture to server:", err);
+                    TabibiAPI.showToast('✓ Profile picture updated locally');
+                }
             };
             reader.readAsDataURL(file);
         }
@@ -223,8 +240,34 @@ const Profile = () => {
                 TabibiAPI.showToast('✓ Profile updated locally');
             }
         } else {
-            TabibiAPI.saveUser(updatedUser);
-            TabibiAPI.showToast('✓ Profile updated');
+            try {
+                const token = TabibiAPI.getToken();
+                const res = await axios.put('/api/auth/profile', {
+                    name: user.name,
+                    phone,
+                    address,
+                    gender,
+                    dob,
+                    image: avatar
+                }, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                
+                const finalUpdatedUser = { 
+                    ...updatedUser,
+                    phone: res.data.phone, 
+                    address: res.data.address, 
+                    dob: res.data.dob,
+                    image: res.data.image,
+                    img: res.data.image
+                };
+                TabibiAPI.saveUser(finalUpdatedUser);
+                TabibiAPI.showToast('✓ Profile updated on server');
+            } catch (err) {
+                console.error("Failed to sync profile to server:", err);
+                TabibiAPI.saveUser(updatedUser);
+                TabibiAPI.showToast('✓ Profile updated locally');
+            }
         }
         setEditing(false);
     };

@@ -235,8 +235,47 @@ const getUserProfile = async (req, res, next) => {
     }
 };
 
+// @desc    Update user profile
+// @route   PUT /api/auth/profile
+// @access  Private
+const updateUserProfile = async (req, res, next) => {
+    try {
+        const user = await User.findById(req.user._id);
+
+        if (user) {
+            user.name = req.body.name || user.name;
+            user.phone = req.body.phone !== undefined ? req.body.phone : user.phone;
+            user.address = req.body.address !== undefined ? req.body.address : user.address;
+            user.dob = req.body.dob !== undefined ? req.body.dob : user.dob;
+            
+            if (req.body.image !== undefined) {
+                user.image = req.body.image;
+            }
+
+            const updatedUser = await user.save();
+
+            res.json({
+                _id: updatedUser._id,
+                name: updatedUser.name,
+                email: updatedUser.email,
+                role: updatedUser.role,
+                image: updatedUser.image,
+                phone: updatedUser.phone,
+                address: updatedUser.address,
+                dob: updatedUser.dob,
+                token: generateToken(updatedUser._id)
+            });
+        } else {
+            res.status(404).json({ message: 'User not found' });
+        }
+    } catch (error) {
+        next(error);
+    }
+};
+
 module.exports = {
     registerUser,
     loginUser,
-    getUserProfile
+    getUserProfile,
+    updateUserProfile
 };

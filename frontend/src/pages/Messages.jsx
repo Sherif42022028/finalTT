@@ -67,7 +67,7 @@ const Messages = () => {
                         dId: dId,
                         pEmail,
                         name: pat.name,
-                        img: pat.img || `https://ui-avatars.com/api/?name=${encodeURIComponent(pat.name)}`,
+                        img: pat.image || pat.img || `https://ui-avatars.com/api/?name=${encodeURIComponent(pat.name)}`,
                         last: lastMsg?.text || 'Click to chat',
                         available: false,
                         unread: chats[key].some(m => m.senderRole !== userObj.role && !m.read)
@@ -107,7 +107,7 @@ const Messages = () => {
                         dId: urlDId,
                         pEmail: urlPEmail,
                         name: target.name,
-                        img: target.img || `https://ui-avatars.com/api/?name=${encodeURIComponent(target.name)}`,
+                        img: TabibiAPI.normalizeImg(target.image || target.img) || `https://ui-avatars.com/api/?name=${encodeURIComponent(target.name)}`,
                         available: doc ? doc.available : false
                     });
                 }

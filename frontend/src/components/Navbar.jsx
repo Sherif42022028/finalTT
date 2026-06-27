@@ -334,7 +334,7 @@ const Navbar = ({ onShowModal }) => {
                             >
                                 <div className="profile-avatar-container">
                                     <img 
-                                        src={user.img || `https://ui-avatars.com/api/?name=${encodeURIComponent(user.name)}`} 
+                                        src={TabibiAPI.normalizeImg(user.image || user.img) || `https://ui-avatars.com/api/?name=${encodeURIComponent(user.name)}`} 
                                         alt={user.name} 
                                         className="profile-avatar-img"
                                     />

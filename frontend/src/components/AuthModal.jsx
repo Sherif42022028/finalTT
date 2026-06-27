@@ -137,6 +137,7 @@ const AuthModal = ({ visible, mode, onClose, onSwitch }) => {
             password: pass,
             role: registerRole,
             dob,
+            image: profilePic || '',
             specialty: registerRole === 'doctor' ? document.getElementById('regSpecialty')?.value : '',
             fee: registerRole === 'doctor' ? parseFloat(document.getElementById('regFee')?.value) || 50 : 0,
             experience: registerRole === 'doctor' ? document.getElementById('regExperience')?.value : '',
