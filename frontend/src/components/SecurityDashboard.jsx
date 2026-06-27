@@ -10,6 +10,9 @@ const SecurityDashboard = ({
     panicMode,
     setPanicMode
 }) => {
+    // Sidebar collapse state
+    const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+    
     // Sub-tab state
     const [activeSubTab, setActiveSubTab] = useState('dashboard');
     const [actionLoading, setActionLoading] = useState(false);
@@ -920,6 +923,32 @@ const SecurityDashboard = ({
                     position: relative;
                     z-index: 10;
                     box-shadow: 4px 0 32px rgba(0,0,0,0.5);
+                    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                    overflow: hidden;
+                }
+
+                .soc-sidebar.collapsed {
+                    width: 0;
+                    min-width: 0;
+                    border-right: 0 solid transparent;
+                    opacity: 0;
+                    pointer-events: none;
+                }
+
+                /* Reset global nav conflicts from index.css */
+                .soc-sidebar nav {
+                    display: flex !important;
+                    flex-direction: column !important;
+                    position: static !important;
+                    height: auto !important;
+                    padding: 8px 0 !important;
+                    background: transparent !important;
+                    border: none !important;
+                    box-shadow: none !important;
+                    z-index: auto !important;
+                    flex: 1 !important;
+                    overflow-y: auto !important;
+                    width: 100% !important;
                 }
 
                 .soc-sidebar::before {
@@ -1430,7 +1459,7 @@ const SecurityDashboard = ({
             `}} />
 
             {/* Inner Security Sidebar */}
-            <aside className="soc-sidebar">
+            <aside className={`soc-sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
                 <div className="brand">
                     <div className="brand-row">
                         <div className="brand-shield">
@@ -1516,7 +1545,34 @@ const SecurityDashboard = ({
 
             {/* Main Content Area */}
             <div className="main-content">
-                <header className="topbar">
+                <header className="topbar" style={{ paddingLeft: '55px', position: 'relative' }}>
+                    <button 
+                        onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+                        title={sidebarCollapsed ? "Expand Security Sidebar" : "Collapse Security Sidebar"}
+                        style={{
+                            position: 'absolute',
+                            left: '12px',
+                            top: '12px',
+                            zIndex: 100,
+                            background: 'rgba(0, 229, 255, 0.05)',
+                            border: '1px solid rgba(0, 229, 255, 0.25)',
+                            color: 'var(--cyan)',
+                            width: '32px',
+                            height: '32px',
+                            borderRadius: '6px',
+                            cursor: 'pointer',
+                            transition: 'all 0.2s ease-in-out',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            boxShadow: '0 0 10px rgba(0, 229, 255, 0.1)'
+                        }}
+                        onMouseOver={(e) => { e.currentTarget.style.background = 'rgba(0, 229, 255, 0.15)'; e.currentTarget.style.boxShadow = '0 0 15px rgba(0, 229, 255, 0.25)'; }}
+                        onMouseOut={(e) => { e.currentTarget.style.background = 'rgba(0, 229, 255, 0.05)'; e.currentTarget.style.boxShadow = '0 0 10px rgba(0, 229, 255, 0.1)'; }}
+                    >
+                        <i className={`fas ${sidebarCollapsed ? 'fa-angle-right' : 'fa-angle-left'}`} style={{ fontSize: '14px' }}></i>
+                    </button>
+
                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                         <i className="fas fa-satellite-dish" style={{ color: 'var(--cyan)' }}></i>
                         <span style={{ letterSpacing: '1.5px', fontSize: '10px', fontFamily: 'var(--title)' }}>MEDICAL SECURITY OPERATIONS CENTER</span>

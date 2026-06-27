@@ -12,6 +12,9 @@ const geoVelocity = require('../security/geoVelocity');
 const appointmentGuard = require('../security/appointmentGuard');
 const ratingGuard = require('../security/ratingGuard');
 const { cairoNow } = require('../security/timeUtils');
+const alertChannels = require('../security/alertChannels');
+const fileScan = require('../security/fileScan');
+const sessionMonitor = require('../security/sessionMonitor');
 
 let ioInstance = null;
 let wafHandler = null;
@@ -47,6 +50,29 @@ function initSecurity(app, server) {
     wafHandler = wafMiddleware(ioInstance);
     logger.setIO(ioInstance);
 
+    fileScan.onRecord(record => {
+        const records = fileScan.readRecords();
+        ioInstance.emit('filescan-record', record);
+        ioInstance.emit('filescan-records', { records: records.slice(0, 250), total: records.length, stats: fileScan.getStats() });
+        ioInstance.emit('filescan-stats', fileScan.getStats());
+        if (record.scanStatus === fileScan.STATUS.THREAT || record.scanStatus === fileScan.STATUS.SUSPICIOUS) {
+            ioInstance.emit('filescan-alert', record);
+        }
+    });
+
+    fileScan.onRecordsCleared(() => {
+        ioInstance.emit('filescan-records', { records: [], total: 0, stats: fileScan.getStats() });
+        ioInstance.emit('filescan-stats', fileScan.getStats());
+    });
+
+    logger.setAlertDispatcher(async entry => {
+        const sent = await alertChannels.dispatchAttack(entry);
+        if (sent && sent.length) {
+            ioInstance.emit('alerts-log', alertChannels.publicConfig().alertLog);
+            ioInstance.emit('alerts-config', alertChannels.publicConfig());
+        }
+    });
+
     // Set up Socket.IO connections for the SOC dashboard
     ioInstance.on('connection', socket => {
         console.log('[SOC] Socket connected:', socket.id);
@@ -66,6 +92,11 @@ function initSecurity(app, server) {
         socket.emit('panic-mode', { active: panicState.get() });
         socket.emit('health-update', healthData);
         socket.emit('security-state', { health: healthData, blocked: blockedIPs, threats: threatEngine.getAllThreats() });
+        socket.emit('alerts-config', alertChannels.publicConfig());
+        socket.emit('alerts-log', alertChannels.publicConfig().alertLog);
+        socket.emit('filescan-records', { records: fileScan.readRecords().slice(0, 250), total: fileScan.readRecords().length, stats: fileScan.getStats() });
+        socket.emit('filescan-stats', fileScan.getStats());
+        socket.emit('sessions-updated', sessionMonitor.getSessionSnapshot());
 
         try {
             const recentLogs = logs.slice(-50);

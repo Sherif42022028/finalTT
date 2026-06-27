@@ -107,9 +107,11 @@ function flushAsync() {
 
 // ─── Socket.IO injection ──────────────────────────────────────────────────────
 let _io = null;
+let _alertDispatcher = null;
 
 /** Injects the Socket.IO server so the logger can forward to SIEM */
 function setIO(io) { _io = io; }
+function setAlertDispatcher(fn) { _alertDispatcher = typeof fn === 'function' ? fn : null; }
 
 // ─── Main enqueue function ────────────────────────────────────────────────────
 /**
@@ -138,6 +140,11 @@ function enqueue(entry) {
 
   try { siemExport.ingest(signed, _io); } catch (err) {
     console.error('[Logger] SIEM ingest failed:', err.message);
+  }
+  if (_alertDispatcher) {
+    Promise.resolve()
+      .then(() => _alertDispatcher(signed))
+      .catch(err => console.error('[Logger] Alert dispatch failed:', err.message));
   }
 
   // Flush immediately once queue grows large to avoid memory build-up
@@ -177,3 +184,4 @@ module.exports.LOG_FILE     = LOG_FILE;
 module.exports.signEntry    = signEntry;
 module.exports.verifyEntry  = verifyEntry;
 module.exports.setIO        = setIO;
+module.exports.setAlertDispatcher = setAlertDispatcher;

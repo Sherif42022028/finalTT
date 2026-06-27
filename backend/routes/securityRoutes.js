@@ -28,6 +28,9 @@ const appointmentGuard = require('../security/appointmentGuard');
 const ratingGuard = require('../security/ratingGuard');
 const fileScan = require('../security/fileScan');
 const siemExport = require('../security/siemExport');
+const sessionMonitor = require('../security/sessionMonitor');
+const multer = require('multer');
+const fileScanUpload = multer({ storage: multer.memoryStorage() });
 
 let pkg = { version: "5.2.0" };
 try {
@@ -665,41 +668,106 @@ router.get('/siem/correlations', requireAdminAuth, (req, res) => {
     res.json(siemExport.getCorrelations(Number(req.query.limit || 50)));
 });
 
-// File scanner API
-router.post('/upload/scan', requireAdminAuth, (req, res) => {
-    const { base64Data, filename, mimeType } = req.body || {};
-    if (!base64Data) return res.status(400).json({ error: 'base64Data required' });
-    try {
-        const buffer = Buffer.from(base64Data, 'base64');
-        const result = fileScan.scan(buffer, filename || 'upload', mimeType || '');
-        if (!result.safe) {
-            const entry = {
-                ip: getClientIP(req), type: 'MALICIOUS_UPLOAD', score: 80,
-                action: 'BLOCKED', time: cairoNow(),
-                path: '/api/upload/scan', method: 'POST',
-                payload: `Malicious file rejected: ${result.reason} [${filename}] sha256=${result.sha256 || 'n/a'}`,
-                analysis: { type: 'MALICIOUS_UPLOAD', risk: 'HIGH', target: 'File upload', technique: result.threats.join(', ') }
-            };
-            if (entry.isoTime === undefined) entry.isoTime = new Date().toISOString();
-            logger(entry);
-            if (req.io) req.io.emit('attack', entry);
-            return res.status(400).json({ safe: false, reason: result.reason, threats: result.threats, sha256: result.sha256 });
-        }
-        res.json({
-            safe: true,
-            mime: result.mime,
-            safeName: result.safeName,
-            sizeBytes: result.sizeBytes,
-            scanMs: result.scanMs,
-            sha256: result.sha256,
-            threats: result.threats || []
+// File scanner API (supports both base64 and multipart file uploads)
+router.post('/upload/scan', fileScanUpload.single('file'), requireAdminAuth, (req, res) => {
+    const uploaded = req.file;
+    if (uploaded) {
+        // Multipart File Upload Mode (used by new dashboard)
+        const body = req.body || {};
+        const result = fileScan.scan(uploaded.buffer, uploaded.originalname, uploaded.mimetype);
+        const record = fileScan.recordScan({
+            file: uploaded,
+            result,
+            req,
+            userInfo: {
+                username: body.username,
+                email: body.email,
+                device: body.device,
+                browser: body.browser,
+                uploadLocation: body.uploadLocation,
+                accountActivity: body.accountActivity
+            },
+            uploadLocation: body.uploadLocation || 'Website upload validation',
+            accountActivity: body.accountActivity || `${req.method} ${req.originalUrl}`
         });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+
+        const entry = {
+            ip: record.ipAddress,
+            type: record.scanStatus === fileScan.STATUS.THREAT ? 'FILE_SCAN_THREAT' : (record.scanStatus === fileScan.STATUS.SUSPICIOUS ? 'FILE_SCAN_SUSPICIOUS' : 'FILE_SCAN_SAFE'),
+            score: record.riskScore || 0,
+            action: record.scanStatus === fileScan.STATUS.THREAT ? 'BLOCKED' : (record.scanStatus === fileScan.STATUS.SUSPICIOUS ? 'FLAGGED' : 'SCANNED'),
+            time: cairoNow(),
+            isoTime: record.scanTimestamp || new Date().toISOString(),
+            path: '/api/upload/scan',
+            method: 'POST',
+            payload: record.fileName,
+            analysis: {
+                type: 'FILE_SCAN',
+                risk: record.threatSeverity || 'Low',
+                target: record.uploadLocation || 'Website upload validation',
+                technique: record.reasonForClassification,
+                indicators: record.malwareSignaturesOrIndicators,
+                sha256: record.sha256,
+                user: record.email || record.username
+            }
+        };
+        logger(entry);
+
+        if (record.scanStatus !== fileScan.STATUS.SAFE) {
+            if (req.io) req.io.emit('filescan-alert', record);
+        }
+
+        if (record.scanStatus === fileScan.STATUS.THREAT) {
+            const blockedRecord = blockIP(record.ipAddress, 'FILE_SCAN_THREAT-auto', record.reasonForClassification || 'Threat file uploaded');
+            if (req.io) {
+                req.io.emit('ip-auto-banned', { ip: record.ipAddress, reason: 'FILE_SCAN_THREAT', score: record.riskScore || 100, time: cairoNow() });
+                req.io.emit('blocked-list', getBlockedIPs());
+                req.io.emit('incident-response', { type: 'BLOCK_IP', record: blockedRecord });
+                req.io.emit('attack', entry);
+                req.io.emit('new-threat', entry);
+            }
+        }
+
+        const payload = { success: record.scanStatus === fileScan.STATUS.SAFE, record, scan: result };
+        if (record.scanStatus === fileScan.STATUS.THREAT) return res.status(400).json(payload);
+        if (record.scanStatus === fileScan.STATUS.SUSPICIOUS) return res.status(202).json(payload);
+        return res.json(payload);
+    } else {
+        // Base64 JSON Mode (Active Workspace original logic)
+        const { base64Data, filename, mimeType } = req.body || {};
+        if (!base64Data) return res.status(400).json({ error: 'base64Data or file is required' });
+        try {
+            const buffer = Buffer.from(base64Data, 'base64');
+            const result = fileScan.scan(buffer, filename || 'upload', mimeType || '');
+            if (!result.safe) {
+                const entry = {
+                    ip: getClientIP(req), type: 'MALICIOUS_UPLOAD', score: 80,
+                    action: 'BLOCKED', time: cairoNow(),
+                    path: '/api/upload/scan', method: 'POST',
+                    payload: `Malicious file rejected: ${result.reason} [${filename}] sha256=${result.sha256 || 'n/a'}`,
+                    analysis: { type: 'MALICIOUS_UPLOAD', risk: 'HIGH', target: 'File upload', technique: result.threats.join(', ') }
+                };
+                if (entry.isoTime === undefined) entry.isoTime = new Date().toISOString();
+                logger(entry);
+                if (req.io) req.io.emit('attack', entry);
+                return res.status(400).json({ safe: false, reason: result.reason, threats: result.threats, sha256: result.sha256 });
+            }
+            res.json({
+                safe: true,
+                mime: result.mime,
+                safeName: result.safeName,
+                sizeBytes: result.sizeBytes,
+                scanMs: result.scanMs,
+                sha256: result.sha256,
+                threats: result.threats || []
+            });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
     }
 });
 
-// Geolocation travel checking API
+// Geolocation travel checking API (Legacy support)
 router.post('/geo/check', requireAdminAuth, async (req, res) => {
     const { userId, ip } = req.body || {};
     if (!userId || !ip) return res.status(400).json({ error: 'userId and ip required' });
@@ -729,6 +797,433 @@ router.post('/geo/check', requireAdminAuth, async (req, res) => {
 router.get('/geo/location/:userId', requireAdminAuth, (req, res) => {
     const loc = geoVelocity.getLastLocation(req.params.userId);
     res.json(loc || { error: 'No location on record' });
+});
+
+// ─── Alerts & Channels API ───
+const alertChannels = require('../security/alertChannels');
+
+router.get('/alerts/config', requireAdminAuth, (req, res) => {
+    res.json(alertChannels.publicConfig());
+});
+
+router.post('/alerts/config', requireAdminAuth, (req, res) => {
+    const config = alertChannels.updateConfig(req.body || {});
+    if (req.io) req.io.emit('alerts-config', config);
+    res.json({ success: true, config });
+});
+
+router.get('/alerts/log', requireAdminAuth, (req, res) => {
+    res.json({ log: alertChannels.publicConfig().alertLog });
+});
+
+router.delete('/alerts/log', requireAdminAuth, (req, res) => {
+    alertChannels.clearLog();
+    if (req.io) {
+        req.io.emit('alerts-log', []);
+        req.io.emit('alerts-config', alertChannels.publicConfig());
+    }
+    res.json({ success: true });
+});
+
+router.post('/alerts/test-email', requireAdminAuth, async (req, res) => {
+    const body = req.body || {};
+    const recipients = body.recipients || body.to || [];
+    const list = Array.isArray(recipients) ? recipients : [recipients];
+    const smtp = body.smtp || alertChannels.state.smtp;
+    const results = [];
+    for (const to of list.filter(Boolean)) {
+        try {
+            await alertChannels.sendEmail({
+                smtp,
+                to,
+                subject: body.subject || '[TABIBI SOC] Test email',
+                body: body.body || 'TABIBI SOC email alerts are configured correctly.'
+            });
+            results.push(alertChannels.logAlert({ type: 'TEST', trigger: 'manual', channel: 'email', to, message: 'Test email delivered successfully', status: 'SENT' }));
+        } catch (err) {
+            results.push(alertChannels.logAlert({ type: 'TEST', trigger: 'manual', channel: 'email', to, message: 'Test email failed', status: 'FAILED', error: err.message }));
+        }
+    }
+    if (req.io) {
+        req.io.emit('alerts-log', alertChannels.publicConfig().alertLog);
+        req.io.emit('alerts-config', alertChannels.publicConfig());
+    }
+    const failed = results.find(r => r.status === 'FAILED');
+    res.status(failed ? 400 : 200).json({ success: !failed, results, error: failed?.error });
+});
+
+router.post('/alerts/send-email', requireAdminAuth, async (req, res) => {
+    const body = req.body || {};
+    try {
+        await alertChannels.sendEmail({
+            smtp: body.smtp || alertChannels.state.smtp,
+            to: body.to,
+            subject: body.subject,
+            body: body.body
+        });
+        const item = alertChannels.logAlert({ type: 'ALERT', trigger: body.trigger || 'manual', channel: 'email', to: body.to, message: body.subject || 'Alert email sent', status: 'SENT' });
+        if (req.io) {
+            req.io.emit('alerts-log', alertChannels.publicConfig().alertLog);
+            req.io.emit('alerts-config', alertChannels.publicConfig());
+        }
+        res.json({ success: true, item });
+    } catch (err) {
+        const item = alertChannels.logAlert({ type: 'ALERT', trigger: body.trigger || 'manual', channel: 'email', to: body.to, message: body.subject || 'Alert email failed', status: 'FAILED', error: err.message });
+        if (req.io) req.io.emit('alerts-log', alertChannels.publicConfig().alertLog);
+        res.status(400).json({ success: false, error: err.message, item });
+    }
+});
+
+router.post('/alerts/test-sms', requireAdminAuth, async (req, res) => {
+    const body = req.body || {};
+    const recipients = body.recipients || body.to || [];
+    const list = Array.isArray(recipients) ? recipients : [recipients];
+    const twilio = body.twilio || alertChannels.state.twilio;
+    const results = [];
+    for (const to of list.filter(Boolean)) {
+        const result = await alertChannels.sendSms({ twilio, to, body: body.body || 'TABIBI SOC SMS alerts are configured correctly.' });
+        results.push(alertChannels.logAlert({ type: 'TEST', trigger: 'manual', channel: 'sms', to, message: result.success ? 'Test SMS delivered successfully' : 'Test SMS failed', status: result.success ? 'SENT' : 'FAILED', error: result.error }));
+    }
+    if (req.io) {
+        req.io.emit('alerts-log', alertChannels.publicConfig().alertLog);
+        req.io.emit('alerts-config', alertChannels.publicConfig());
+    }
+    const failed = results.find(r => r.status === 'FAILED');
+    res.status(failed ? 400 : 200).json({ success: !failed, results, error: failed?.error });
+});
+
+router.post('/alerts/send-sms', requireAdminAuth, async (req, res) => {
+    const body = req.body || {};
+    const result = await alertChannels.sendSms({ twilio: body.twilio || alertChannels.state.twilio, to: body.to, body: body.body });
+    const item = alertChannels.logAlert({ type: 'ALERT', trigger: body.trigger || 'manual', channel: 'sms', to: body.to, message: result.success ? 'Alert SMS sent' : 'Alert SMS failed', status: result.success ? 'SENT' : 'FAILED', error: result.error });
+    if (req.io) {
+        req.io.emit('alerts-log', alertChannels.publicConfig().alertLog);
+        req.io.emit('alerts-config', alertChannels.publicConfig());
+    }
+    res.status(result.success ? 200 : 400).json({ ...result, item });
+});
+
+// ─── Geo Velocity API ───
+router.get('/geo-velocity', requireAdminAuth, (req, res) => {
+    res.json(geoVelocity.getSnapshot());
+});
+
+router.post('/geo-velocity/check', requireAdminAuth, async (req, res) => {
+    const body = req.body || {};
+    const userId = body.userId || body.email || body.username;
+    const ip = body.ip || getClientIP(req);
+    if (!userId) return res.status(400).json({ error: 'userId is required' });
+    const result = await geoVelocity.check(userId, ip, {
+        user: body.username || body.name || userId,
+        email: body.email || ''
+    });
+    if (req.io) req.io.emit('geo-velocity-state', geoVelocity.getSnapshot());
+    res.json(result);
+});
+
+router.post('/geo-velocity/record', requireAdminAuth, async (req, res) => {
+    const body = req.body || {};
+    const userId = body.userId || body.email || body.username;
+    const ip = body.ip || getClientIP(req);
+    if (!userId) return res.status(400).json({ error: 'userId is required' });
+    const geo = await geoVelocity.recordLogin(userId, ip, {
+        user: body.username || body.name || userId,
+        email: body.email || ''
+    });
+    if (req.io) req.io.emit('geo-velocity-state', geoVelocity.getSnapshot());
+    res.json({ success: true, geo });
+});
+
+router.delete('/geo-velocity/events', requireAdminAuth, (req, res) => {
+    geoVelocity.clearEvents();
+    if (req.io) req.io.emit('geo-velocity-state', geoVelocity.getSnapshot());
+    res.json({ success: true });
+});
+
+// ─── File Scan Records & Exporters ───
+
+function csvEscape(value) {
+    const text = String(value == null ? '' : Array.isArray(value) ? value.join('|') : value);
+    return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+const FILESCAN_EXPORT_FIELDS = [
+    'id', 'fileName', 'fileType', 'fileExtension', 'mimeType', 'fileSize',
+    'uploadTimestamp', 'scanTimestamp', 'scanStatus', 'classificationStatus',
+    'riskScore', 'threatSeverity', 'confidenceScore', 'reasonForClassification',
+    'detectionResults', 'securityAnalysisSummary', 'malwareSignaturesOrIndicators',
+    'indicatorsOfCompromise', 'md5', 'sha1', 'sha256', 'detectionRulesTriggered',
+    'scanEngineVersion', 'username', 'email', 'userId', 'ipAddress', 'device',
+    'operatingSystem', 'browser', 'userAgent', 'uploadLocation', 'accountActivity',
+    'lastLoginTimestamp', 'sessionInformation', 'auditSignature'
+];
+
+function recordsToCsv(records) {
+    return [
+        FILESCAN_EXPORT_FIELDS.join(','),
+        ...records.map(record => FILESCAN_EXPORT_FIELDS.map(field => csvEscape(record[field])).join(','))
+    ].join('\n');
+}
+
+function xmlEscape(value) {
+    return String(value == null ? '' : Array.isArray(value) ? value.join('|') : value)
+        .replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
+}
+
+const CRC_TABLE = (() => {
+    const table = new Array(256);
+    for (let n = 0; n < 256; n += 1) {
+        let c = n;
+        for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+        table[n] = c >>> 0;
+    }
+    return table;
+})();
+
+function crc32(buffer) {
+    let crc = 0xffffffff;
+    for (const byte of buffer) crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+    return (crc ^ 0xffffffff) >>> 0;
+}
+
+function zipStore(files) {
+    const locals = [];
+    const centrals = [];
+    let offset = 0;
+    files.forEach(file => {
+        const name = Buffer.from(file.name);
+        const data = Buffer.isBuffer(file.data) ? file.data : Buffer.from(file.data);
+        const crc = crc32(data);
+        const local = Buffer.alloc(30);
+        local.writeUInt32LE(0x04034b50, 0);
+        local.writeUInt16LE(20, 4);
+        local.writeUInt16LE(0, 6);
+        local.writeUInt16LE(0, 8);
+        local.writeUInt32LE(0, 10);
+        local.writeUInt32LE(crc, 14);
+        local.writeUInt32LE(data.length, 18);
+        local.writeUInt32LE(data.length, 22);
+        local.writeUInt16LE(name.length, 26);
+        locals.push(local, name, data);
+        const central = Buffer.alloc(46);
+        central.writeUInt32LE(0x02014b50, 0);
+        central.writeUInt16LE(20, 4);
+        central.writeUInt16LE(20, 6);
+        central.writeUInt16LE(0, 8);
+        central.writeUInt16LE(0, 10);
+        central.writeUInt32LE(0, 12);
+        central.writeUInt32LE(crc, 16);
+        central.writeUInt32LE(data.length, 20);
+        central.writeUInt32LE(data.length, 24);
+        central.writeUInt16LE(name.length, 28);
+        central.writeUInt32LE(offset, 42);
+        centrals.push(central, name);
+        offset += local.length + name.length + data.length;
+    });
+    const centralSize = centrals.reduce((sum, b) => sum + b.length, 0);
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0);
+    end.writeUInt16LE(files.length, 8);
+    end.writeUInt16LE(files.length, 10);
+    end.writeUInt32LE(centralSize, 12);
+    end.writeUInt32LE(offset, 16);
+    return Buffer.concat([...locals, ...centrals, end]);
+}
+
+function recordsToXlsx(records) {
+    const rows = [FILESCAN_EXPORT_FIELDS, ...records.map(r => FILESCAN_EXPORT_FIELDS.map(f => r[f]))];
+    const sheetRows = rows.map((row, rIdx) => `<row r="${rIdx + 1}">${row.map((v, cIdx) => {
+        const col = String.fromCharCode(65 + (cIdx % 26));
+        return `<c r="${col}${rIdx + 1}" t="inlineStr"><is><t>${xmlEscape(v)}</t></is></c>`;
+    }).join('')}</row>`).join('');
+    return zipStore([
+        { name: '[Content_Types].xml', data: '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>' },
+        { name: '_rels/.rels', data: '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>' },
+        { name: 'xl/workbook.xml', data: '<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Scan History" sheetId="1" r:id="rId1"/></sheets></workbook>' },
+        { name: 'xl/_rels/workbook.xml.rels', data: '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>' },
+        { name: 'xl/worksheets/sheet1.xml', data: `<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${sheetRows}</sheetData></worksheet>` }
+    ]);
+}
+
+function recordsToPdf(records) {
+    const lines = ['Tabibi Scan History Export', `Generated ${new Date().toISOString()}`, `Records ${records.length}`, ''];
+    records.forEach(r => lines.push(`${r.scanTimestamp || ''} | ${r.classificationStatus || r.scanStatus || ''} | ${r.fileName || ''} | ${r.email || r.username || ''} | ${r.threatSeverity || ''} | ${r.reasonForClassification || ''}`));
+    const text = lines.join('\n').replace(/[()\\]/g, '\\$&');
+    const stream = `BT /F1 8 Tf 36 806 Td 10 TL (${text.slice(0, 60000).replace(/\n/g, ') Tj T* (')}) Tj ET`;
+    const objects = [
+        '<< /Type /Catalog /Pages 2 0 R >>',
+        '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+        '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+        '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+        `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`
+    ];
+    let pdf = '%PDF-1.4\n';
+    const offsets = [0];
+    objects.forEach((obj, i) => { offsets.push(Buffer.byteLength(pdf)); pdf += `${i + 1} 0 obj\n${obj}\nendobj\n`; });
+    const xref = Buffer.byteLength(pdf);
+    pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+    offsets.slice(1).forEach(o => { pdf += String(o).padStart(10, '0') + ' 00000 n \n'; });
+    pdf += `trailer << /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+    return Buffer.from(pdf);
+}
+
+router.get('/filescan/records', requireAdminAuth, (req, res) => {
+    const result = fileScan.queryRecords(req.query || {});
+    res.json({ ...result, stats: fileScan.getStats() });
+});
+
+router.get('/filescan/stats', requireAdminAuth, (req, res) => {
+    res.json(fileScan.getStats());
+});
+
+router.get('/filescan/timeline', requireAdminAuth, (req, res) => {
+    const threats = fileScan.queryRecords({ ...req.query, status: req.query.status || '', limit: req.query.limit || 500 }).records
+        .filter(r => r.scanStatus !== fileScan.STATUS.SAFE)
+        .map(r => ({
+            id: r.id,
+            type: r.scanStatus === fileScan.STATUS.THREAT ? 'FILE_SCAN_THREAT' : 'FILE_SCAN_SUSPICIOUS',
+            ip: r.ipAddress,
+            score: r.riskScore,
+            action: r.scanStatus === fileScan.STATUS.THREAT ? 'BLOCKED' : 'FLAGGED',
+            time: r.scanTimestamp || r.uploadTimestamp,
+            isoTime: r.scanTimestamp || r.uploadTimestamp,
+            path: '/api/upload/scan',
+            method: 'POST',
+            payload: r.fileName,
+            analysis: {
+                type: 'FILE_SCAN',
+                risk: r.threatSeverity,
+                target: r.uploadLocation,
+                technique: r.reasonForClassification,
+                indicators: r.malwareSignaturesOrIndicators,
+                sha256: r.sha256,
+                user: r.email || r.username
+            }
+        }))
+        .sort((a, b) => new Date(a.isoTime) - new Date(b.isoTime));
+    res.json({ events: threats, total: threats.length });
+});
+
+router.get('/filescan/export', requireAdminAuth, (req, res) => {
+    const format = String(req.query.format || 'csv').toLowerCase();
+    const records = fileScan.queryRecords({ ...req.query, page: 1, exportAll: true }).records;
+    if (format === 'json') return res.json({ generatedAt: new Date().toISOString(), total: records.length, records });
+    if (format === 'xlsx') {
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', 'attachment; filename="tabibi-scan-history.xlsx"');
+        return res.send(recordsToXlsx(records));
+    }
+    if (format === 'pdf') {
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', 'attachment; filename="tabibi-scan-history.pdf"');
+        return res.send(recordsToPdf(records));
+    }
+    const csv = recordsToCsv(records);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="tabibi-scan-history.csv"`);
+    return res.send(csv);
+});
+
+router.delete('/filescan/records', requireAdminAuth, (req, res) => {
+    fileScan.clearRecords();
+    res.json({ success: true });
+});
+
+// ─── Sessions API ───
+router.get('/sessions', requireAdminAuth, (req, res) => {
+    res.json(sessionMonitor.getSessionSnapshot());
+});
+
+router.delete('/sessions', requireAdminAuth, (req, res) => {
+    sessionMonitor.sessionMonitor.history = [];
+    if (req.io) req.io.emit('sessions-updated', sessionMonitor.getSessionSnapshot());
+    res.json({ success: true });
+});
+
+router.post('/sessions/track', (req, res) => {
+    const body = req.body || {};
+    const userId = body._id || body.id || body.email;
+    if (!userId) return res.status(400).json({ error: 'Session user id required' });
+
+    const role = sessionMonitor.normalizeRole(body.role);
+    const ip = sessionMonitor.getClientIP(req);
+    const browserSessionId = body.sessionId ? String(body.sessionId).slice(0, 120) : String(userId);
+    const id = `app:${String(userId)}:${browserSessionId}`;
+    const now = Date.now();
+    const existing = sessionMonitor.sessionMonitor.active[id];
+    const identity = sessionMonitor.getSessionIdentity({ userId, email: body.email, user: body.name });
+    sessionMonitor.removeDuplicateAppSessions(id, identity);
+    
+    sessionMonitor.sessionMonitor.active[id] = {
+        id,
+        userId: String(userId),
+        user: body.name || body.email || String(userId),
+        email: body.email || '',
+        role,
+        ip,
+        startedAt: existing?.startedAt || now,
+        startedAtIso: existing?.startedAtIso || new Date(now).toISOString(),
+        lastSeen: now,
+        lastSeenIso: new Date(now).toISOString(),
+        expiresAt: now + 30 * 60000,
+        userAgent: req.headers['user-agent'] || '',
+        status: 'ACTIVE',
+        source: 'TABIBI_APP'
+    };
+
+    const requestedAction = body.action || (existing ? 'APP_SESSION_ACTIVE' : 'APP_SESSION_STARTED');
+    const action = !existing && sessionMonitor.isHeartbeatAction(requestedAction) ? 'SESSION_STARTED' : requestedAction;
+    const shouldLogHistory = !sessionMonitor.isHeartbeatAction(action);
+    const event = shouldLogHistory ? sessionMonitor.pushSessionEvent({
+        user: sessionMonitor.sessionMonitor.active[id].user,
+        role,
+        ip,
+        action,
+        note: body.email || browserSessionId || 'TABIBI app session'
+    }) : null;
+
+    if (req.io) {
+        req.io.emit('sessions-updated', sessionMonitor.getSessionSnapshot());
+        sessionMonitor.emitSessionEvent(req.io, event);
+    }
+    
+    sessionMonitor.runGeoVelocityCheck({
+        _id: userId,
+        id: body.id,
+        name: body.name,
+        email: body.email,
+        role: body.role
+    }, req, action, req.io).catch(() => {});
+    
+    res.json({ success: true, session: sessionMonitor.sessionMonitor.active[id] });
+});
+
+router.post('/sessions/end', (req, res) => {
+    const body = req.body || {};
+    const userId = body._id || body.id || body.email;
+    if (!userId) return res.status(400).json({ error: 'Session user id required' });
+
+    const browserSessionId = body.sessionId ? String(body.sessionId).slice(0, 120) : String(userId);
+    const id = `app:${String(userId)}:${browserSessionId}`;
+    const rec = sessionMonitor.sessionMonitor.active[id];
+    if (rec) {
+        const durationMs = Date.now() - Number(rec.startedAt || Date.now());
+        delete sessionMonitor.sessionMonitor.active[id];
+        const event = sessionMonitor.pushSessionEvent({
+            user: rec.user,
+            role: rec.role,
+            ip: rec.ip,
+            action: 'LOGOUT',
+            duration: Math.max(1, Math.round(durationMs / 1000)) + 's',
+            note: rec.email || rec.id
+        });
+        if (req.io) {
+            sessionMonitor.emitSessionEvent(req.io, event);
+        }
+    }
+
+    if (req.io) req.io.emit('sessions-updated', sessionMonitor.getSessionSnapshot());
+    res.json({ success: true });
 });
 
 // Appointment Guard endpoints
